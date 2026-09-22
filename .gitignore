@@ -1,0 +1,41 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+.conda/
+*.egg-info/
+dist/
+build/
+
+# ---- 环境变量 / 密钥 ----
+.env
+.env.*
+!.env.example
+
+# ---- 数据 / 缓存 ----
+*.db
+*.sqlite3
+*.log
+logs/
+.cache/
+chroma_db/
+data/vector_store/
+
+# ---- Node ----
+node_modules/
+.next/
+out/
+dist/
+
+# ---- IDE / 系统 ----
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
