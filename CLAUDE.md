@@ -20,21 +20,24 @@
 
 | 阶段 | 状态 |
 |---|---|
-| P0.1 建 venv + 钉版本 | ⚠️ venv 有，`pyproject.toml` 尚未落盘 |
+| P0.1 建 venv + 钉版本 | ✅ `pyproject.toml` 已落盘（版本取自 `pip freeze`） |
 | P0.2 验证 `interrupt()` 语义 | ✅ 结论已回填文档 |
 | P0.3 验证 LLM 的 tool_calls 格式 | ✅ 5 场景全通过，**不需要归一化层** |
 | P0.4 实测回填文档 | ✅ |
-| **P1 契约层** | ⬜ **下一步做这个** |
+| **P1 契约层** | 🟡 **进行中** —— P1.1 ✅ / P1.2~P1.7 ⬜ |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
-**下一步**：进 P1 契约层（`state.py` / `edges.py` / 配置 / 异常 + 三个单测文件）。P1 **完全不碰 LLM**，无需 API key。注意 P1.1 要补两件事：① `pyproject.toml`（用 `pip freeze` 从现有 `.venv` 导出真实版本，别照抄本文手写）② ruff 配置（当前 `ruff check .` 是红的，两个 scratch 脚本各 10 条默认规则告警，需排除或 ignore）。
+**下一步**：P1.2 `app/graph/state.py`（`TravelState` 及全部子模型，含 reducer 语义），然后 P1.3 `edges.py`、P1.4 `tools/base.py`、P1.5/P1.6 异常与配置、P1.7 三个单测。P1 **完全不碰 LLM**，无需 API key。
+
+**P1.1 已完成**：目录骨架（`app/` 全部子包 + `tests/` + `data/` + `eval/` + `scripts/`）、`pyproject.toml`（ruff 显式钉规则集 + pytest 配置）、`.env.example`。
+`ruff check .` 与 `pytest -q` 均为绿。**`scratch/` 被 ruff 整体排除**——那是一次性探针脚本，刻意写得啰嗦且宽异常兜底，与 lint 规则正面冲突。**`data/raw/` 与 `eval/reports/` 已补进 `.gitignore`**（此前缺，是硬红线 #6 的缺口）。
 
 ## 环境
 
 **必须用项目内的 `.venv`，不要用全局 Python。** Windows 下解释器路径：`.venv/Scripts/python.exe`
 
-已装版本（不要随意升级）：
+已装版本（不要随意升级）。**唯一权威来源是 `pyproject.toml`**（版本取自 `.venv` 的 `pip freeze`），下面是速查：
 
 ```
 langgraph 1.2.7 · langgraph-checkpoint-sqlite 3.1.1 · langchain-core 1.6.4

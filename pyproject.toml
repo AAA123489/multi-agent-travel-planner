@@ -1,0 +1,92 @@
+# 多 Agent 智能旅行规划系统 —— 项目清单 + 工具配置
+#
+# 本项目是**应用**不是库：不发布、不 pip install 自身。
+# 代码从仓库根目录直接运行，靠 pytest 的 pythonpath=["."] 解析 `import app`。
+# 因此这里**故意不声明 [build-system]**（venv 里也没有 setuptools）。
+#
+# 依赖版本 = 从现有 .venv `pip freeze` 导出的真实版本，不是手写的。
+# 只列**直接依赖**；上游传递依赖由 venv 自身钉住。
+# pandas 故意缺席 —— 推迟到 P8 数据接入阶段（见 CLAUDE.md）。
+
+[project]
+name = "multi-agent-travel-planner"
+version = "0.1.0"
+description = "多 Agent 智能旅行规划系统：需求补齐 → 工具取数 → 自我反思 → 人在回路 → 评估报告"
+requires-python = ">=3.11"
+dependencies = [
+    # --- Web 层（P5）---
+    "fastapi==0.141.1",
+    "uvicorn==0.53.0",
+    # --- 契约 / 配置（P1）---
+    "pydantic==2.13.5",
+    "python-dotenv==1.2.3",
+    # --- 图与编排（P3）---
+    "langgraph==1.2.7",
+    "langgraph-checkpoint-sqlite==3.1.1",
+    "langchain-core==1.6.4",
+    # --- LLM（P4）---
+    # 两套并存：openai 直连用于需要看原始返回的路径（P0.3 已实测），
+    # langchain-openai 用于 with_structured_output 等结构化输出路径。
+    "langchain-openai==1.6.4",
+    "openai==3.19.0",
+    # --- 其他 ---
+    "httpx==0.28.1",      # SSE 客户端测试 / 未来 AmapBackend
+    "PyYAML==6.0.3",      # eval/dataset/test_cases.yaml（P9）
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff==0.16.8",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+# ============================================================================
+# ruff
+# ============================================================================
+
+[tool.ruff]
+line-length = 100
+# 声明支持的最低 Python 版本（venv 实际是 3.12，但代码要保持 3.11 可跑）
+target-version = "py311"
+# scratch/ 是**一次性验证脚本**，不是产品代码：它刻意写得很啰嗦（逐行中文注释
+# 讲清每个 API 在干什么）、且刻意用宽异常兜底（某个环境差异不该让探针整个挂掉）。
+# 这些写法与 lint 规则正面冲突，而它们正是脚本存在的意义 —— 故整体排除。
+# 产物 app/ tests/ scripts/ 仍然全量检查。
+extend-exclude = ["scratch"]
+
+[tool.ruff.lint]
+# 显式钉住规则集，避免 ruff 升级后默认集变化导致 CI 变红
+# （本项目原则是「钉版本」，见 CLAUDE.md）
+select = [
+    "E4", "E7", "E9",  # pycodestyle 报错类
+    "F",               # pyflakes：未用导入 / 未定义名字
+    "W",               # pycodestyle 警告类
+    "I",               # isort：导入排序
+    "UP",              # pyupgrade：过时写法
+    "B",               # flake8-bugbear：常见陷阱
+    "SIM",             # flake8-simplify
+    "RUF",             # ruff 自有规则
+]
+ignore = [
+    # 全角标点误报：本项目注释与 prompt 大量使用中文「，。」「（）」，
+    # RUF001/002/003 会把它们判成「易混淆 Unicode」
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ============================================================================
+# pytest
+# ============================================================================
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# 让 `import app` 在没有 pip install 的情况下可用
+pythonpath = ["."]
+addopts = "-q --strict-markers"
+# pytest-asyncio：P5 的 SSE / 异步工具测试需要
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
