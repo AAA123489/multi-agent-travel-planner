@@ -20,12 +20,15 @@
 
 | 阶段 | 状态 |
 |---|---|
-| P0.1 建 venv + 钉版本 | ✅ |
+| P0.1 建 venv + 钉版本 | ⚠️ venv 有，`pyproject.toml` 尚未落盘 |
 | P0.2 验证 `interrupt()` 语义 | ✅ 结论已回填文档 |
-| **P0.3 验证 LLM 的 tool_calls 格式** | ⬜ **下一步做这个** |
-| P1 契约层 | ⬜ |
+| P0.3 验证 LLM 的 tool_calls 格式 | ✅ 5 场景全通过，**不需要归一化层** |
+| P0.4 实测回填文档 | ✅ |
+| **P1 契约层** | ⬜ **下一步做这个** |
 
-**下一步**：写 `scratch/verify_tool_calls.py`，确认 DeepSeek/GLM 返回的是标准 `tool_calls` 字段，而不是文本形式的 DSML（详见开发流程 P0.3）。这是唯一需要 API key 的 P0 任务。
+**P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
+
+**下一步**：进 P1 契约层（`state.py` / `edges.py` / 配置 / 异常 + 三个单测文件）。P1 **完全不碰 LLM**，无需 API key。注意 P1.1 要补两件事：① `pyproject.toml`（用 `pip freeze` 从现有 `.venv` 导出真实版本，别照抄本文手写）② ruff 配置（当前 `ruff check .` 是红的，两个 scratch 脚本各 10 条默认规则告警，需排除或 ignore）。
 
 ## 环境
 
