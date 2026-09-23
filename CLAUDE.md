@@ -24,18 +24,33 @@
 | P0.2 验证 `interrupt()` 语义 | ✅ 结论已回填文档 |
 | P0.3 验证 LLM 的 tool_calls 格式 | ✅ 5 场景全通过，**不需要归一化层** |
 | P0.4 实测回填文档 | ✅ |
-| **P1 契约层** | 🟡 **进行中** —— P1.1 ✅ / P1.2~P1.7 ⬜ |
+| **P1 契约层** | 🟡 **进行中** —— P1.1 ✅ / P1.2 ✅ / P1.3~P1.7 ⬜ |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
-**下一步**：P1.2 `app/graph/state.py`（`TravelState` 及全部子模型，含 reducer 语义），然后 P1.3 `edges.py`、P1.4 `tools/base.py`、P1.5/P1.6 异常与配置、P1.7 三个单测。P1 **完全不碰 LLM**，无需 API key。
+**P1.2 实测结论**：LangGraph **确实支持** Pydantic `BaseModel` 作状态 schema + 其上的 `Annotated[list, add]` reducer（`tests/test_state.py::test_reducers_inside_real_graph` 在真实编译图上验证）。同时确认节点拿到的状态是**模型对象**（可属性访问 `state.review_comments[0].severity`），不是裸 dict。**升级 langgraph 后这个测试若变红，说明状态契约层行为变了。**
+
+**下一步**：P1.3 `app/graph/edges.py`（三个路由纯函数，全分支单测），然后 P1.4 `tools/base.py`、P1.5/P1.6 异常与配置、P1.7 补齐 `test_edges.py` / `test_config.py`。P1 **完全不碰 LLM**，无需 API key。
 
 **P1.1 已完成**：目录骨架（`app/` 全部子包 + `tests/` + `data/` + `eval/` + `scripts/`）、`pyproject.toml`（ruff 显式钉规则集 + pytest 配置）、`.env.example`。
 `ruff check .` 与 `pytest -q` 均为绿。**`scratch/` 被 ruff 整体排除**——那是一次性探针脚本，刻意写得啰嗦且宽异常兜底，与 lint 规则正面冲突。**`data/raw/` 与 `eval/reports/` 已补进 `.gitignore`**（此前缺，是硬红线 #6 的缺口）。
 
+**P1.2 已完成**：`app/graph/state.py`（`TravelState` + `TravelRequirement` / `ReviewComment` / `EvalResult` / `ConfirmInput` + 字面量类型别名）、`tests/test_state.py`（6 个测试）。
+
+**P1.2 顺手修补的两处文档契约缺口**（§3.1 是字段权威定义，但文档别处引用了它没有的字段）：
+
+1. `unresolved_errors` —— 被 §4.4 载荷 / §5.2 的 G1 / §10 的 SSE 事件**引用了三处**，但 `TravelState` 里没有。**处理：做成 `@property` 派生视图，不加字段**。因为 `review_comments` 是覆盖语义、任何时刻恰好持有本轮全部意见，再存一份 error 子集就是第二份事实来源，迟早漂移。
+2. `estimated_cost` —— 同样被 §4.4 / §10 引用，没有字段，且 §4.4 的输入清单里连唯一可能的来源 `plan_struct` 都没有。**处理：把 `plan_struct` 补进 §4.4 输入**，并注明它须与 `evaluate` 的 `budget_fit` 共用同一套预算估算，否则确认页的数字和评估报告的数字会对不上。
+
+另：`TravelRequirementDelta`（§4.1 引用）**推迟到 P4.0** 定义 —— 其形状取决于 `with_structured_output` 的实测结果，而那项还没验。
+
 ## 环境
 
 **必须用项目内的 `.venv`，不要用全局 Python。** Windows 下解释器路径：`.venv/Scripts/python.exe`
+
+**跑 pytest 时加 `-X utf8`** —— 即 `.venv/Scripts/python.exe -X utf8 -m pytest`。
+Windows 控制台默认 GBK，不加这个参数时**中文断言失败信息全是乱码**，没法读。
+（`ruff check` 输出是 ASCII，不受影响。）
 
 已装版本（不要随意升级）。**唯一权威来源是 `pyproject.toml`**（版本取自 `.venv` 的 `pip freeze`），下面是速查：
 
