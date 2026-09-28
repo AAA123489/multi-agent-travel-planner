@@ -24,13 +24,37 @@
 | P0.2 验证 `interrupt()` 语义 | ✅ 结论已回填文档 |
 | P0.3 验证 LLM 的 tool_calls 格式 | ✅ 5 场景全通过，**不需要归一化层** |
 | P0.4 实测回填文档 | ✅ |
-| **P1 契约层** | 🟡 **进行中** —— P1.1 ✅ / P1.2 ✅ / P1.3~P1.7 ⬜ |
+| **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘，`ruff` 干净 / **98 passed** |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
 **P1.2 实测结论**：LangGraph **确实支持** Pydantic `BaseModel` 作状态 schema + 其上的 `Annotated[list, add]` reducer（`tests/test_state.py::test_reducers_inside_real_graph` 在真实编译图上验证）。同时确认节点拿到的状态是**模型对象**（可属性访问 `state.review_comments[0].severity`），不是裸 dict。**升级 langgraph 后这个测试若变红，说明状态契约层行为变了。**
 
-**下一步**：P1.3 `app/graph/edges.py`（三个路由纯函数，全分支单测），然后 P1.4 `tools/base.py`、P1.5/P1.6 异常与配置、P1.7 补齐 `test_edges.py` / `test_config.py`。P1 **完全不碰 LLM**，无需 API key。
+**下一步：进 P2 数据层**（顺序见 docs/开发流程.md 的 P2 段）。
+
+**一件悬着的事 —— G5（内容收敛检测）怎么落地由你定。** 它现在实现不了：要比较「新旧 `draft_plan` 的相似度」，而 `draft_plan` 是**覆盖**语义，上一轮草稿已被覆盖，比无可比。已在 `route_after_review` 的 docstring 与 §5.2 标注。两条路：
+
+- **加 `draft_history: Annotated[list[str], add]`** —— 跟 `review_history` 一个模式，G5 即可落地。代价是一个状态字段 + 每轮几 KB。
+- **砍掉 G5** —— `MAX_REVIEW_RETRY=3` 已把上限压得很低，G5 最多再省 1–2 轮 LLM 调用。**为性能优化污染核心状态契约，是性价比最低的一类改动。**（推荐砍）
+
+**测试全绿 ≠ 覆盖到位** —— 已实测三次，可复现：删掉 `exceptions.py` 的 `= None`、把路由的 `>=` 改成 `>`、把 `ToolResult` 的不变式判断反过来，每次都**只有新写的测试**才变红（前两次分别是「全绿」和「两条红」）。**新模块落盘必须有测试真的 import 它**，否则它的死活 pytest 不知道，输出上和「全对」长得一模一样。
+
+P1 **完全不碰 LLM**，无需 API key。
+
+**P1.4 定案（2026-09-28）**：接口分**两层**，吃的东西不一样 ——
+
+| 层 | 谁调它 | `estimate_distance` 入参 |
+|---|---|---|
+| 工具门面 `TravelTools` | 节点（deterministic）/ LLM（agent） | `from_id, to_id`（LLM 只能给字符串） |
+| 按域 Protocol | 门面 + registry | `a: POI, b: POI`（距离是经纬度纯函数） |
+
+id → POI 的转换**只在门面一处**。三个按域 Protocol：`POIBackend`（`query_poi` + `get_opening_hours`）/ `DistanceBackend` / `HotelBackend`。**`IntercityBackend` 不预留** —— 契约未定义（§6.6），写了就是编。
+
+顺带定下三处契约修正：**① Protocol 一律返回 `ToolResult` 而非裸值**（裸返回值表达不了失败，与硬红线 #4 冲突）；**② 门面与 Protocol 的方法名刻意不同**（`poi_query` vs `query_poi`），看调用点即可判断层级；**③ `OpeningHours` 加 `all_day`** —— 否则「全天开放」和「解析失败」撞在同一个 `open=None` 上。
+
+**数据源决策（2026-09-28，已写入 §6.6）**：采纳 **高德 + AIGOHOTEL + 飞常准**；**不采纳 12306**（只有社区逆向实现，无公开 API/授权）与**小红书**（需人工扫码 + 个人账号 Cookie，公网部署有账号安全风险，且 UGC 无结构填不进 `POI`）。注意**飞常准要单列**：`TravelState` 当前没有任何字段装城际交通段，`plan_struct` 未定义它，`Transport` 只覆盖市内交通 —— 接它是**产品变更而非换数据源**，配置里先留 `INTERCITY_BACKEND` 开关，功能等契约定完再上。
+
+**AIGOHOTEL / 飞常准都走路线 C（离线抓取）**，所以 MCP 客户端只是 `scripts/fetch_*.py` 的**开发期依赖**，不进 `pyproject.toml` 的 `dependencies`，运行时仍读本地 JSON、零外部调用 —— 路线 C 的可复现性不被破坏。
 
 **P1.1 已完成**：目录骨架（`app/` 全部子包 + `tests/` + `data/` + `eval/` + `scripts/`）、`pyproject.toml`（ruff 显式钉规则集 + pytest 配置）、`.env.example`。
 `ruff check .` 与 `pytest -q` 均为绿。**`scratch/` 被 ruff 整体排除**——那是一次性探针脚本，刻意写得啰嗦且宽异常兜底，与 lint 规则正面冲突。**`data/raw/` 与 `eval/reports/` 已补进 `.gitignore`**（此前缺，是硬红线 #6 的缺口）。
@@ -63,6 +87,8 @@ ruff 0.16.8 · pytest 9.1.1 · pytest-asyncio 1.4.0
 **pandas 故意没装** —— 推迟到 P8 数据接入阶段。
 
 `scratch/verify_interrupt.py` 随时可重跑（不需 API key、不联网）。**升级 langgraph 版本后必须重跑** —— 这是全项目唯一一处依赖特定库版本行为的设计。
+
+**写测试时永不把密钥写进断言。** pytest 的断言自省会**把实际值原文打印到终端** —— 失败路径就是一条泄露路径。已踩过：`assert get_settings().llm_api_key == ""` 在配有 `.env` 的机器上必然失败，于是真实 key 被打了出去。只断言与 `.env` 无关的性质（例如「不抛异常」）。
 
 ## 硬红线
 
