@@ -74,6 +74,25 @@ def test_unresolved_errors_is_derived_not_stored():
     assert "unresolved_errors" not in TravelState().model_dump()
 
 
+def test_no_draft_history_field():
+    """**G5 已放弃 —— 钉住它的前置条件不存在**（§5.2，2026-09-28 定案）。
+
+    G5（内容收敛检测）要比较「新旧 `draft_plan` 的相似度」，而 `draft_plan` 是
+    **覆盖**语义，上一轮草稿已被覆盖，比无可比。要落地它，**第一步必然**是给
+    `TravelState` 加一个累加语义的 `draft_history`（`Annotated[list[str], add]`）。
+
+    所以这个字段的存在与否，就是「G5 有没有被重新捡起来」的判据。**哪天这条测试
+    变红，说明有人正在加 `draft_history`** —— 那正是提醒你回去读 §5.2 的理由、
+    确认这个决策是不是要推翻，而不是顺手把测试改绿。
+
+    与 `test_intercity_backend_is_deliberately_absent`（tests/test_tools.py）
+    是同一类钉子：**把「我们刻意没做某件事」写成可执行的断言。**
+    设计决定不写成测试，就会被下一个人当作遗漏补回来。
+    """
+    assert "draft_history" not in TravelState.model_fields
+    assert "draft_history" not in TravelState().model_dump()
+
+
 def test_confirm_input_requires_known_action():
     """resume 值契约：action 只接受 approve / revise。"""
     assert ConfirmInput(action="approve").feedback == ""
