@@ -25,13 +25,45 @@
 | P0.3 验证 LLM 的 tool_calls 格式 | ✅ 5 场景全通过，**不需要归一化层** |
 | P0.4 实测回填文档 | ✅ |
 | **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘 |
-| **P2 数据与工具层** | ✅ **完成** —— 30 条 POI + 三个 mock backend + 四个工具 + registry 分发，`ruff` 干净 / **163 passed** |
+| **P2 数据与工具层** | ✅ **完成** —— 30 条 POI + 三个 mock backend + 四个工具 + registry 分发 |
+| **P3 图流转打通** | ✅ **完成（★ 里程碑 M1）** —— 建图 + 5 个节点空壳 + 装饰器，四条路径全走通，`ruff` 干净 / **187 passed** |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
 **P1.2 实测结论**：LangGraph **确实支持** Pydantic `BaseModel` 作状态 schema + 其上的 `Annotated[list, add]` reducer（`tests/test_state.py::test_reducers_inside_real_graph` 在真实编译图上验证）。同时确认节点拿到的状态是**模型对象**（可属性访问 `state.review_comments[0].severity`），不是裸 dict。**升级 langgraph 后这个测试若变红，说明状态契约层行为变了。**
 
-**下一步：进 P3 图流转打通**（★ 里程碑 M1，顺序见 docs/开发流程.md 的 P3 段）。P3 要建图 + 接 checkpointer，**不碰 LLM**（节点先返回假数据打通流转）。
+**P3 已完成（2026-09-29）** —— ★ 里程碑 M1。
+
+| 任务 | 产出 |
+|---|---|
+| P3.1 | `app/graph/nodes/{requirement_collect,plan_generate,self_review,user_confirm,evaluate}.py` —— 五个空壳（**空壳≠什么都不做**，见下） |
+| P3.2 | `app/graph/nodes/decorators.py` —— `@traced_node`：计时、日志、`node_trace` 追加、异常兜底 |
+| P3.3 | `app/graph/builder.py` —— 建图 + `build_graph(checkpointer, overrides=)` + `graph_config()` |
+| P3.4 | `scratch/walk_graph.py` —— 打印拓扑 + 实际走完四条路径 |
+| P3.5 | `tests/test_graph.py` —— **24 条**（拓扑 3 / 四条路径 4 / 不可旁路 2 / 装饰器 5 / 装配 5 / 校验 5） |
+| — | `scratch/verify_traced_node.py`（新探针）+ `scratch/mutate_p3.py`（变异测试，可重跑） |
+
+**四条路径全部符合预期**，其中路径③（用户拒绝一次）实测轨迹：
+
+```
+rc#1 → pg#1 → sr#1 → pg#2 → sr#2 → uc#1 → pg#3 → sr#3 → pg#4 → sr#4 → uc#2 → eval#1
+```
+
+用户修改后机器**重新拿到完整自省预算**，所以第二个循环又「先失败一次再通过」。`retry_count` 与 `user_revision_count` 全程互不污染。
+
+**P3 实测踩出来的三个坑**（都写进文档了）：
+
+1. **异常兜底会吞掉 `interrupt()`** —— `GraphInterrupt` 是 `Exception` 的子类，最自然的 `except Exception` 把它当成节点故障。后果不是「暂停失败」而是**暂停被换成死循环**：节点返回错误状态 → `user_confirmed` 仍是 False → 路由判成「用户要改」送回生成节点 → 转一圈再来 → 最后 `GraphRecursionError`。修法是 `except GraphBubbleUp: raise` 放在前面。**变异① 实测：删掉这一行，8 条测试同时变红。**
+2. **`snapshot.values` 不是完整状态，只含被写过的通道。** 「一次通过」路径里没人写过 `retry_count`，`values["retry_count"]` 直接 `KeyError`，而同名默认值是 0。**P5 的 API 层读状态一律先过 `TravelState.model_validate(snapshot.values)`。**
+3. **Pydantic 模型进 checkpoint 触发 msgpack 反序列化警告**，且那是一条**安全边界**（宽松模式可被篡改的 checkpoint 触发任意代码执行）。已实测出配方：`JsonPlusSerializer(allowed_msgpack_modules=[("app.graph.state", ...)])` 传给 `serde=`，警告归零。**P5 建 `services/checkpoint.py` 时照抄。**
+
+**新增一处 P4 阻塞项：`plan_struct` 的 schema 全文未定义**（§4.2 已记录）。它是 `plan_generate` 的第二输出段、`self_review` 全部程序化校验、§8.2 的 `estimated_cost` 三处的前置，而 §3.1 只把它声明成裸 `dict`。**P3 刻意不编占位形状** —— 编出来要么被推翻、要么被人当成契约照抄。
+
+**P3 定下的两处接口形状**：`build_graph(checkpointer, *, overrides={节点名: 替身})` 与 `graph_config(session_id)`。`overrides` **只换节点行为、不换图的连线**（`test_overrides_do_not_change_topology` 守着），所以结构断言不受它影响；`graph_config` 把 `thread_id` 与 `recursion_limit`（G4）绑在一处，避免漏写的那处静默退回默认值 25。
+
+**默认空壳审核「永远不通过」是刻意的** —— 它让 G1 降级放行成为**默认可见**的行为，而不是要靠注入才看得到的分支。想看通过的那条路用 `overrides` 换行为（`tests/test_graph.py` 的 `review_failing_times()` 与 `scratch/walk_graph.py` 的 `review_passing_after()`）。
+
+**下一步：进 P4 节点填肉**。P4.0 有**两个待验项**（都不写代码，先验再定契约）：`TravelRequirementDelta` 的形状（§4.1，取决 `with_structured_output` 实测）与 **`plan_struct` 的 schema**。顺序见 docs/开发流程.md 的 P4 段。
 
 **P2 已完成（2026-09-29）**：
 
@@ -60,11 +92,11 @@
 
 于是闸门编号 **G1~G4 是跳号的**（没有 G5），**跳号是刻意的**，它是一处「这里删过一个闸门」的记录。看到编号不连续就想补一个回来 = 把已做的决策推翻一遍。理由写在 [方案设计.md](docs/方案设计.md) §5.2 与 `route_after_review` 的 docstring 两处。
 
-**测试全绿 ≠ 覆盖到位** —— 已实测七次，可复现。P1 的三次：删掉 `exceptions.py` 的 `= None`、把路由的 `>=` 改成 `>`、把 `ToolResult` 的不变式判断反过来，每次都**只有新写的测试**才变红（前两次分别是「全绿」和「两条红」）。P2 的四次（全部变红，符合预期）：把 `MockPOIBackend.query_poi` 改名、酒店阈值 `<` 改成 `<=`、`ROAD_FACTOR` 1.3 改成 1.0、坏行容错改成整批失败。
+**测试全绿 ≠ 覆盖到位** —— 已实测十六次，可复现。P1 的三次：删掉 `exceptions.py` 的 `= None`、把路由的 `>=` 改成 `>`、把 `ToolResult` 的不变式判断反过来，每次都**只有新写的测试**才变红（前两次分别是「全绿」和「两条红」）。P2 的四次（全部变红）：把 `MockPOIBackend.query_poi` 改名、酒店阈值 `<` 改成 `<=`、`ROAD_FACTOR` 1.3 改成 1.0、坏行容错改成整批失败。P3 的九次（**9/9 全被抓住**，脚本 `scratch/mutate_p3.py` 可重跑）：吞掉 interrupt、忘记清零 `retry_count`、把「生成→审核」改成「生成→确认」、空壳审核改成永远通过、`ask` 分支接错、漏掉 `recursion_limit`、`node_trace` 序号写死为 1、审核不自增 `retry_count`、`revise` 不校验空意见。
 
 **新模块落盘必须有测试真的 import 它**，否则它的死活 pytest 不知道，输出上和「全对」长得一模一样。**变异测试是唯一能证明这件事的手段** —— 改一行、跑一遍、看红不红，比读覆盖率数字可靠。
 
-P1 **完全不碰 LLM**，无需 API key。
+P1 / P2 / P3 **完全不碰 LLM**，无需 API key（P3 的 187 条测试 0.6 秒跑完、不联网）。
 
 **P1.4 定案（2026-09-28）**：接口分**两层**，吃的东西不一样 ——
 
