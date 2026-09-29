@@ -1,9 +1,14 @@
 """`requirement_collect` 需求收集节点（P3.1 空壳）—— 对应 §4.1。
 
 P3 阶段**不调用 LLM**：本文件只保留「图能不能走通」所依赖的那几行确定性逻辑
-（必填项判定、追问轮数自增、`user_query` 消费后清空）。P4 会把 LLM 的
-`with_structured_output(TravelRequirementDelta)` 接进来，替换掉的只有
-`_extract_delta` 这一处 —— 其余判定与 §4.1 的契约无关，不会被推翻。
+（必填项判定、追问轮数自增、`user_query` 消费后清空）。P4 会把 LLM 的结构化抽取
+接进来，替换掉的只有 `_extract_delta` 这一处 —— 其余判定与 §4.1 的契约无关，不会被推翻。
+
+> ⚠️ **P4 接 LLM 时走 `build_llm("cheap").structured(TravelRequirementDelta)`，
+> 不要在本文件里写 `llm.with_structured_output(...)`。** 裸写法在 DeepSeek 上
+> 100% 400（默认 method 是 `json_schema`），且要在每个节点各踩一遍 ——
+> 两条纪律都封在 `app/core/llm.py`（§12.2），
+> `tests/test_llm.py::test_nodes_never_build_their_own_chat_openai` 守着这件事。
 
 ## 「空壳」不等于「什么都不做」
 
@@ -72,9 +77,14 @@ def build_question(missing: list[str]) -> str:
 def _extract_delta(state: TravelState, config: RunnableConfig) -> dict[str, Any]:
     """本轮从 `user_query` 里抽出的字段增量 —— **P3 返回空增量**。
 
-    P4 在这里调用便宜模型（`LLM_MODEL_CHEAP`）做 `with_structured_output`，
-    返回**只含新增/修改字段**的 delta。用 delta 而不是全量，是为了避免 LLM
-    把已经收集好的字段顺手抹掉（§4.1 要点 1）。
+    P4 在这里调用便宜档（`build_llm("cheap").structured(...)`，见模块 docstring
+    的警告），返回**只含新增/修改字段**的 delta。用 delta 而不是全量，是为了避免
+    LLM 把已经收集好的字段顺手抹掉（§4.1 要点 1）。
+
+    ⚠️ 合并用 `model_dump(exclude_unset=True)`，**不要用 `exclude_none=True`**：
+    delta 模型的字段全是 `| None`（P4.0 实测 Q2 的决定性结论），逐个判断
+    「None 是没提到还是明确置空」会退化成猜。`exclude_unset` 能区分这两者 ——
+    而它成立的前提正是「所有字段可空」，q.v. `TravelRequirementDelta`。
 
     返回空 dict 的含义是「这一轮什么都没抽到」—— 它与「抽到但值为 null」
     不同：后者应当**覆盖**掉旧值（用户说了「不设预算」，那就是没有预算）。

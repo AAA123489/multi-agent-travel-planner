@@ -27,7 +27,7 @@
 | **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘 |
 | **P2 数据与工具层** | ✅ **完成** —— 30 条 POI + 三个 mock backend + 四个工具 + registry 分发 |
 | **P3 图流转打通** | ✅ **完成（★ 里程碑 M1）** —— 建图 + 5 个节点空壳 + 装饰器，四条路径全走通，`ruff` 干净 / **187 passed** |
-| **P4.0 结构化输出实测 + `plan_struct` 定稿** | ✅ **完成** —— ⚠️ **照字面写 `with_structured_output` 会 100% 400**（§12.2）；`plan_struct` 三模型已落 `state.py`，195 passed |
+| **P4.0 结构化输出实测 + 契约 + LLM 工厂** | ✅ **完成** —— ⚠️ **照字面写 `with_structured_output` 会 100% 400**（§12.2）；`plan_struct` 三模型已落 `state.py`；`app/core/llm.py` 落盘。`ruff` 干净 / **227 passed** / 真实调用探针全绿 / **19 条变异全中** |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
@@ -43,9 +43,9 @@
 - **`start_date` 没有归一化**：输入「10月1号」返回的就是 `'10月1号'`。§4.1 实现要点 4 那句「由 LLM 结合注入的 `today` 换算」在现有 prompt 下不成立，P4.1 要补正反例。
 - 「禁止编造」**有效**：输入「想去成都玩」，5/5 只抽到 `destination`，没编 `days`/`travelers`/`origin`/`start_date`。
 
-**P4.0 对 `app/core/llm.py`（P4.0-C，还没写）的硬要求**：「显式 `method="function_calling"`」和「关 thinking」必须**封在工厂一处**，节点代码不许自己建 `ChatOpenAI` —— 否则这两件事会在每个节点各踩一遍，而且第二件踩了**不报错**。
+**P4.0 对 `app/core/llm.py` 的硬要求 → 已由 P4.0-C 兑现**：「显式 `method="function_calling"`」和「关 thinking」封在工厂一处，节点代码不许自己建 `ChatOpenAI` —— 否则这两件事会在每个节点各踩一遍，而且第二件踩了**不报错**。详见下方「P4.0-C 已完成」。
 
-**尚未验**：主力档（`plan_generate`/`self_review`）关不关 thinking。留给 P4.2 —— thinking ON 时 `with_structured_output(fc)` 不可用、但 `bind_tools(tool_choice="auto")` 可用（已实测），所以保留推理能力的路是通的。**不能因为省 token 就默认把主力档的推理关掉。**
+**尚未验**：主力档（`plan_generate`/`self_review`）关不关 thinking。留给 P4.2 —— thinking ON 时 `with_structured_output(fc)` 不可用、但 `bind_tools(tool_choice="auto")` 可用（已实测），所以保留推理能力的路是通的，且**工厂已经自动走那条路**（`structured()` 按 thinking 选路）。**不能因为省 token 就默认把主力档的推理关掉。**
 
 **P4.0 第二个待验项：`plan_struct` 的 schema 已定稿**（§3.1 / §4.2 / §4.3 / §8.2 同步）。三个模型 `PlanStruct` / `PlanDay` / `PlanItem` 落在 `app/graph/state.py`，`TravelState.plan_struct` 从裸 `dict` 收紧为 `PlanStruct | None`。**字段全部从下游倒推**（§4.3 七条校验 + §8.2 预算各需要什么就定什么），每个字段都有一位「主」。
 
@@ -90,13 +90,45 @@ rc#1 → pg#1 → sr#1 → pg#2 → sr#2 → uc#1 → pg#3 → sr#3 → pg#4 →
 2. **`snapshot.values` 不是完整状态，只含被写过的通道。** 「一次通过」路径里没人写过 `retry_count`，`values["retry_count"]` 直接 `KeyError`，而同名默认值是 0。**P5 的 API 层读状态一律先过 `TravelState.model_validate(snapshot.values)`。**
 3. **Pydantic 模型进 checkpoint 触发 msgpack 反序列化警告**，且那是一条**安全边界**（宽松模式可被篡改的 checkpoint 触发任意代码执行）。已实测出配方：`JsonPlusSerializer(allowed_msgpack_modules=[("app.graph.state", ...)])` 传给 `serde=`，警告归零。**P5 建 `services/checkpoint.py` 时照抄。**
 
-**新增一处 P4 阻塞项：`plan_struct` 的 schema 全文未定义**（§4.2 已记录）。它是 `plan_generate` 的第二输出段、`self_review` 全部程序化校验、§8.2 的 `estimated_cost` 三处的前置，而 §3.1 只把它声明成裸 `dict`。**P3 刻意不编占位形状** —— 编出来要么被推翻、要么被人当成契约照抄。
+**原先那处 P4 阻塞项（`plan_struct` 的 schema 未定义）已在 P4.0 解除。** 它是 `plan_generate` 的第二输出段、`self_review` 全部程序化校验、§8.2 的 `estimated_cost` 三处的前置，而 §3.1 当时只把它声明成裸 `dict`。P3 刻意没编占位形状 —— 编出来要么被推翻、要么被人当成契约照抄；P4.0 从**下游消费者倒推**定出了 `PlanStruct` / `PlanDay` / `PlanItem`（§3.1）。
 
 **P3 定下的两处接口形状**：`build_graph(checkpointer, *, overrides={节点名: 替身})` 与 `graph_config(session_id)`。`overrides` **只换节点行为、不换图的连线**（`test_overrides_do_not_change_topology` 守着），所以结构断言不受它影响；`graph_config` 把 `thread_id` 与 `recursion_limit`（G4）绑在一处，避免漏写的那处静默退回默认值 25。
 
 **默认空壳审核「永远不通过」是刻意的** —— 它让 G1 降级放行成为**默认可见**的行为，而不是要靠注入才看得到的分支。想看通过的那条路用 `overrides` 换行为（`tests/test_graph.py` 的 `review_failing_times()` 与 `scratch/walk_graph.py` 的 `review_passing_after()`）。
 
-**下一步：P4.0-C —— 写 `app/core/llm.py`。** 两个待验项都已完成（结论见上），契约齐了。工厂的硬要求：**「显式 `method="function_calling"`」与「关 thinking」必须封在一处**，节点代码不许自己建 `ChatOpenAI`；另配 token/耗时埋点与双模型槽位（便宜档关 thinking，主力档待 P4.2 定）。之后进 P4.1 `requirement_collect` 接真 LLM。顺序见 docs/开发流程.md 的 P4 段。
+**P4.0-C 已完成（2026-09-29）—— `app/core/llm.py`**
+
+| 任务 | 产出 |
+|---|---|
+| 工厂 | `app/core/llm.py` —— 三槽位（`cheap` / `main` / `judge`）+ `structured()` 自动选路 + token/耗时回调 + 异常包装与脱敏 |
+| 测试 | `tests/test_llm.py` —— **32 条，全部离线**（不联网、不需要 key） |
+| 真实调用探针 | `scratch/verify_llm_factory.py` —— 正例 + **反面样本**（拿两种错误写法去调，要求必须 400） |
+| 变异测试 | `scratch/mutate_p40c.py` —— **19/19 全被抓住** |
+
+**工厂封住四件事**，前三件都是「踩了不报错」的：
+
+1. 显式 `method="function_calling"` —— 默认的 `json_schema` 在 DeepSeek 上 100% 400。
+2. `extra_body={"thinking": {"type": "disabled"}}` —— 另两种写法被接受但**不生效**。
+3. 三槽位的 thinking / 温度 —— **不暴露成参数**。judge 钉死 `temperature=0`（§8.2 要可复现），cheap 关 thinking，main 先开着（P4.2 定）。
+4. `structured()` 内部按 thinking 自动选路 —— 开着就走 `bind_tools` + 手动解析。**调用方拿到的是同一个东西**：invoke 出来就是 Pydantic 模型。
+
+**节点代码不许自己建 `ChatOpenAI`。** 第 1、2 条踩了都没有症状，只在某个节点的调用上莫名 400，那时没人会怀疑到「工厂外多建了一个客户端」。由 `test_nodes_never_build_their_own_chat_openai` 用 **AST** 扫描守着。
+
+**又实测出四条**（全文见方案设计 §12.2 末）：
+
+- `reasoning_tokens` 经 langchain-core 归一化后叫 **`reasoning`**（原始 openai SDK 才叫前者）。只认一套 → 另一条路径上那个量永远「缺失」，而「缺失」与「thinking 关着」同形。
+- **thinking 关着时这个键整个不出现，不是 0** —— 判据要写 `.get(key, 0) == 0`。探针第一次就是这么红的。
+- 打开那一侧 `{"thinking": {"type": "enabled"}}` 有效，工厂**显式写出来**（服务端若把默认翻成关，省略写法会静默丢推理能力）。
+- **prompt cache 在生效**：cheap 档 337 个 input token 里 128 个是 cache_read。
+
+**两处被变异测试改强的地方**（都是我自己写弱了）：
+
+- **扫描器走 AST，不走字符串匹配** —— 字符串匹配会把「警告别人别用」也判成违规（节点 docstring 里正写着这条纪律），而人只会去改措辞，不会去改扫描器。
+- **扫描目录的自检按模块名断言，不数文件个数** —— 第一版写 `len(paths) >= 5`，指到 `tests/` 时文件数照样够，扫描测试静默失效。⑱ 号变异抓出来的。
+
+**两处工厂边界**：`build_llm` 的缓存键 = 全部相关设置（不是「按 slot 缓存 + 手动失效」，后者漏清一次的症状是「改了配置不生效」）；`LLM_API_KEY` 为空时用占位密钥构造（`ChatOpenAI(api_key="")` 会直接抛 `Missing credentials`，那样离线单测都得先有真密钥），真正的门是 P5 lifespan 里的 `validate_startup()`。
+
+**下一步：P4.1 `requirement_collect` 接真 LLM。** 三件事：① 定义 `TravelRequirementDelta`（**必须全字段 `| None`**，这是 delta 语义的载体，不是风格选择 —— §12.2 的 Q2 决定性结论）；② 修 `start_date` 归一化（实测「10月1号」原样返回，§4.1 要点 4 那句不成立，补正反例）；③ 追问话术换成 LLM 生成。顺序见 docs/开发流程.md 的 P4 段。
 
 **P2 已完成（2026-09-29）**：
 
@@ -177,6 +209,8 @@ ruff 0.16.8 · pytest 9.1.1 · pytest-asyncio 1.4.0
 **pandas 故意没装** —— 推迟到 P8 数据接入阶段。
 
 `scratch/verify_interrupt.py` 随时可重跑（不需 API key、不联网）。**升级 langgraph 版本后必须重跑** —— 这是全项目唯一一处依赖特定库版本行为的设计。
+
+`scratch/verify_llm_factory.py` 需要 API key 与网络，验的是「工厂发出去的请求服务端真的接受」。跑法 `.venv/Scripts/python.exe -X utf8 scratch/verify_llm_factory.py`。**换模型必须重跑**（同 §12.1 的约定：结论与模型名绑定）。它带**反面样本** —— 拿两种已知会 400 的写法去调并要求必须失败；反面样本不失败就说明探针根本没连上服务端，正例的 ✅ 一文不值。
 
 **写测试时永不把密钥写进断言。** pytest 的断言自省会**把实际值原文打印到终端** —— 失败路径就是一条泄露路径。已踩过：`assert get_settings().llm_api_key == ""` 在配有 `.env` 的机器上必然失败，于是真实 key 被打了出去。只断言与 `.env` 无关的性质（例如「不抛异常」）。
 
