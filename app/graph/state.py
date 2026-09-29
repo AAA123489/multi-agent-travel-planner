@@ -101,6 +101,58 @@ class TravelRequirement(BaseModel):
     transport: Transport | None = None
 
 
+class TravelRequirementDelta(BaseModel):
+    """`requirement_collect` 的单轮抽取结果 —— `TravelRequirement` 的「本轮增量」。
+
+    它**不是状态的一部分**，是那个节点的 LLM 输出契约（§4.1 要点 1）。放在
+    `TravelRequirement` 旁边而不是节点文件里，是因为两者必须**逐字段对齐**：
+    少一个字段 = 那个字段永远抽不出来，而症状只是「追问里没有它」。
+    相邻放着 + `test_delta_and_requirement_have_the_same_fields` 守着同一件事。
+
+    ## 四个字段全部可空，这不是风格选择
+
+    全字段 `| None` → function calling 的 JSON Schema 里 `required` 为空 →
+    模型天然只填它想填的字段 → `model_dump(exclude_unset=True)` 的合并语义成立。
+
+    **把任一字段改成必填，就等于让服务端逼模型编一个值出来**（§4.1 要点 1）。
+    这不是推测：P4.0 实测 10/10 次模型都只返回本轮提到的字段、10/10 次都没带上
+    `destination` —— 而那是**全字段可空时**的行为，改一个必填就换了一套前提。
+
+    ## 为什么不用 `create_model` 从 `TravelRequirement` 派生
+
+    派生能让漂移在结构上不可能发生，看着更漂亮。放弃它的理由有两个：
+
+    1. 本模型的每个字段都要带 `description`（模型靠它理解「总预算」「城市名不带市」），
+       而 `TravelRequirement` 的字段注释是给读代码的人看的，两者内容不同；
+    2. 动态构造的模型在报错、日志、`model_json_schema()` 里都只显示一个字符串名字，
+       排查时要先在脑子里把 `create_model(...)` 求值一遍。**这一层的可读性比少写
+       九个字段值钱**，而漂移由测试守着。
+
+    ## `preferences` 是唯一的列表 —— delta 语义是「追加」不是「覆盖」
+
+    第 2 轮用户说「还想吃点好的」，是往第 1 轮的「人文」上**加**，不是把它换掉。
+    合并规则在 `requirement_collect.merge_delta`，那里有完整说明。
+    """
+
+    origin: str | None = Field(default=None, description="出发城市")
+    destination: str | None = Field(
+        default=None, description="目的地城市名，不带「市」后缀，如「成都」"
+    )
+    start_date: str | None = Field(
+        default=None, description="出发日期，格式 YYYY-MM-DD；换算不出来就留空"
+    )
+    days: int | None = Field(default=None, description="行程天数")
+    budget: float | None = Field(default=None, description="总预算，单位元")
+    travelers: int | None = Field(default=None, description="出行人数")
+    preferences: list[str] | None = Field(
+        default=None, description="偏好标签，只放本轮提到的，如「人文」「美食」"
+    )
+    pace: Pace | None = Field(default=None, description="relaxed / moderate / intense")
+    transport: Transport | None = Field(
+        default=None, description="市内交通：public / taxi / drive / walk"
+    )
+
+
 class ReviewComment(BaseModel):
     """单条反思审核意见。"""
 

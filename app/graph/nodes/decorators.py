@@ -132,7 +132,7 @@ def traced_node(name: str) -> Callable[[NodeFn], NodeFn]:
                 logger.warning(
                     "节点 %s 执行失败（%.0f ms）：%s",
                     entry, elapsed, message,
-                    extra={"thread_id": _thread_id(config)},
+                    extra={"thread_id": thread_id_of(config)},
                 )
                 return {"error": message, "stage": "failed", "node_trace": [entry]}
 
@@ -140,7 +140,7 @@ def traced_node(name: str) -> Callable[[NodeFn], NodeFn]:
             logger.info(
                 "节点 %s 完成（%.0f ms）",
                 entry, elapsed,
-                extra={"thread_id": _thread_id(config)},
+                extra={"thread_id": thread_id_of(config)},
             )
 
             # `node_trace` 由装饰器**独占**：节点若返回了同名字段会被这里覆盖。
@@ -153,7 +153,7 @@ def traced_node(name: str) -> Callable[[NodeFn], NodeFn]:
     return decorator
 
 
-def _thread_id(config: RunnableConfig | None) -> str:
+def thread_id_of(config: RunnableConfig | None) -> str:
     """从运行配置里取 thread_id，纯粹为了日志能定位到会话。
 
     取不到就返回 `-`：**日志函数不该成为新的失败点**。而这不只是防御 ——

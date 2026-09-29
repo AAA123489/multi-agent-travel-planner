@@ -24,7 +24,7 @@ from app.graph.state import TravelState
 # 返回值字面量 —— 与 §5.1 表格右列一一对应
 # ---------------------------------------------------------------------------
 
-RouteAfterCollect = Literal["ask", "plan"]
+RouteAfterCollect = Literal["ask", "plan", "reject"]
 RouteAfterReview = Literal["retry", "confirm"]
 RouteAfterConfirm = Literal["revise", "eval"]
 
@@ -34,17 +34,50 @@ def route_after_collect(
     *,
     max_ask_rounds: int | None = None,
 ) -> RouteAfterCollect:
-    """需求收集之后：继续追问，还是进入行程生成（§5.1 + **G3**）。
+    """需求收集之后：继续追问、直接生成，还是就地终止（§5.1 + **G3**）。
 
-    G3 触发（追问已达上限）时**降级放行**：不再追问，带着缺失字段进入生成，
-    由生成节点补默认值并在行程里显式标注假设（§5.2）。
-    取舍是清楚的 —— 宁可交付一个「写明了假设」的方案，也不要问到用户失去耐心。
+    三个出口：
+
+    | 返回 | 何时 | 去哪 |
+    |---|---|---|
+    | `"reject"` | `stage == "failed"` | `END`（本轮终止，不推进） |
+    | `"ask"` | 缺必填项且追问未达上限 | `END`（等用户下一轮输入） |
+    | `"plan"` | 不缺，或 G3 触发 | `plan_generate` |
+
+    ## `"reject"` 这条出口是 P4.1 加的
+
+    §5.1 原先只有 `ask` / `plan` 两个。加了它，是因为「需求收集阶段没有可用的
+    结果」这件事**此前无处可去**：`route_after_collect` 只读 `missing_fields`，
+    而两种情况都会让它判成 `plan` ——
+
+      - **目的地不在已接入范围**（§4.1 要点 5）：字段一个不缺，`missing_fields`
+        是空的，于是图一路冲进 `plan_generate`，拿不到任何 POI，最后交出一份
+        每个景点都是幻觉的行程；
+      - **节点自己崩了**：`@traced_node` 兜底后返回 `{error, stage: failed}`，
+        `missing_fields` 保持上一轮的值。第 1 轮它是空的 → 同样冲进 `plan_generate`，
+        带着一份**完全空白的需求**。
+
+    两条都是「不该也不能继续往下走」。所以这里复用同一条出口，判据是
+    `stage == "failed"` —— 那也是 `traced_node` 失败时写的值。给用户看的话术
+    两种情况下都已经在 `state.error` 里了，路由不复述（复述就多一份事实来源）。
+
+    ## G3 触发时**降级放行**，不是终止
+
+    追问已达上限就不再追问，带着缺失字段进入生成，由生成节点补默认值并在行程里
+    显式标注假设（§5.2）。取舍是清楚的 —— 宁可交付一个「写明了假设」的方案，
+    也不要问到用户失去耐心。
+
+    **注意两者处置相反是有道理的**：G3 缺的是「锦上添花的信息」，兜底就能往下走；
+    `reject` 缺的是「能算的东西」，兜底只会产出一份假的行程。
 
     这条判断**必须在路由里，不能挪进节点**：节点只知道「我这轮问了什么」，
     「还要不要继续问」是控制流决策，只有路由看得见全局状态。
 
     :param max_ask_rounds: 留空则取 `Settings.max_ask_rounds`（§12）。
     """
+
+    if state.stage == "failed":
+        return "reject"
 
     if not state.missing_fields:
         return "plan"

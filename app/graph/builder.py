@@ -110,11 +110,13 @@ def build_graph(
 
     builder.add_edge(START, "requirement_collect")
 
-    # G3 在 route_after_collect 里：缺字段且追问未达上限 → "ask" → END 等下一轮
+    # G3 在 route_after_collect 里：缺字段且追问未达上限 → "ask" → END 等下一轮。
+    # "reject" 是 P4.1 加的第三条出口（目的地不支持 / 节点自己崩了）—— 同样回 END，
+    # 因为「本轮没有可用的需求」时绝不能推进到生成节点（理由见 route_after_collect）。
     builder.add_conditional_edges(
         "requirement_collect",
         route_after_collect,
-        {"ask": END, "plan": "plan_generate"},
+        {"ask": END, "plan": "plan_generate", "reject": END},
     )
 
     # 无条件边：生成完必过审核，没有任何绕过的路径（硬红线 #3）
