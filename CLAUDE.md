@@ -27,8 +27,25 @@
 | **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘 |
 | **P2 数据与工具层** | ✅ **完成** —— 30 条 POI + 三个 mock backend + 四个工具 + registry 分发 |
 | **P3 图流转打通** | ✅ **完成（★ 里程碑 M1）** —— 建图 + 5 个节点空壳 + 装饰器，四条路径全走通，`ruff` 干净 / **187 passed** |
+| **P4.0 结构化输出实测** | ✅ **完成** —— ⚠️ **照字面写 `with_structured_output` 会 100% 400**，两处修正已回填 §4.1 / §4.5 / §12.2 |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
+
+**P4.0 实测结论（2026-09-29）—— 三条都会静默或响亮地失败，务必先读**：
+
+1. **`llm.with_structured_output(Schema)` 在 DeepSeek 上 100% 400。** 它的默认 method 是 `json_schema`（走 `response_format`），服务端不认。**必须显式 `method="function_calling"`**。「不传」与「显式传 `json_schema`」是同一个失败 —— 代码看着没写错，只是没写全。§4.1 / §8.2 的原文照抄会直接崩。
+2. **`function_calling` 还必须先关 thinking**，否则 `Thinking mode does not support this tool_choice`（`deepseek-v4-flash` 默认开着 thinking，而它不接受被强制的 `tool_choice`）。
+3. **关 thinking 的参数形状只有一个是对的**：`extra_body={"thinking": {"type": "disabled"}}`。`{"enable_thinking": False}` 与 `{"chat_template_kwargs": {"enable_thinking": False}}` **被服务端收下但不生效，且不报错** —— 直接对话两种都成功，看不出来。**唯一试金石是拿 `function_calling` 去调。** 与 P2 那个「Protocol 继承让漏实现静默返回 None」同一型：**不报错的失效比报错的失效难查一个量级。**
+
+**P4.0 顺带验出的两条**：
+
+- **`exclude_unset` 可以直接用，delta 模式前提成立。** 而且 prompt 里写不写「没提到的字段不要输出」**没有差别**（两个变体各 10 次，都 10/10 省略）。机制在 schema 上：全字段可空 → JSON Schema 的 `required` 为空 → 模型天然只填想填的。**推论：`TravelRequirementDelta` 必须全字段 `| None` —— 这是 delta 语义的载体，不是风格选择。**
+- **`start_date` 没有归一化**：输入「10月1号」返回的就是 `'10月1号'`。§4.1 实现要点 4 那句「由 LLM 结合注入的 `today` 换算」在现有 prompt 下不成立，P4.1 要补正反例。
+- 「禁止编造」**有效**：输入「想去成都玩」，5/5 只抽到 `destination`，没编 `days`/`travelers`/`origin`/`start_date`。
+
+**P4.0 对 `app/core/llm.py`（P4.0-C，还没写）的硬要求**：「显式 `method="function_calling"`」和「关 thinking」必须**封在工厂一处**，节点代码不许自己建 `ChatOpenAI` —— 否则这两件事会在每个节点各踩一遍，而且第二件踩了**不报错**。
+
+**尚未验**：主力档（`plan_generate`/`self_review`）关不关 thinking。留给 P4.2 —— thinking ON 时 `with_structured_output(fc)` 不可用、但 `bind_tools(tool_choice="auto")` 可用（已实测），所以保留推理能力的路是通的。**不能因为省 token 就默认把主力档的推理关掉。**
 
 **P1.2 实测结论**：LangGraph **确实支持** Pydantic `BaseModel` 作状态 schema + 其上的 `Annotated[list, add]` reducer（`tests/test_state.py::test_reducers_inside_real_graph` 在真实编译图上验证）。同时确认节点拿到的状态是**模型对象**（可属性访问 `state.review_comments[0].severity`），不是裸 dict。**升级 langgraph 后这个测试若变红，说明状态契约层行为变了。**
 
@@ -63,7 +80,7 @@ rc#1 → pg#1 → sr#1 → pg#2 → sr#2 → uc#1 → pg#3 → sr#3 → pg#4 →
 
 **默认空壳审核「永远不通过」是刻意的** —— 它让 G1 降级放行成为**默认可见**的行为，而不是要靠注入才看得到的分支。想看通过的那条路用 `overrides` 换行为（`tests/test_graph.py` 的 `review_failing_times()` 与 `scratch/walk_graph.py` 的 `review_passing_after()`）。
 
-**下一步：进 P4 节点填肉**。P4.0 有**两个待验项**（都不写代码，先验再定契约）：`TravelRequirementDelta` 的形状（§4.1，取决 `with_structured_output` 实测）与 **`plan_struct` 的 schema**。顺序见 docs/开发流程.md 的 P4 段。
+**下一步：P4.0-B / P4.0-C**。P4.0 的两个待验项里，**第一个（`with_structured_output` 实测）已验完**（见上）；**第二个 `plan_struct` 的 schema 仍待定**，而且它的字段可以从下游倒推（§4.3 七条校验 + §8.2 预算估算各自需要什么），不必凭空发明。之后才能写 `app/core/llm.py`（P4.0-C）。顺序见 docs/开发流程.md 的 P4 段。
 
 **P2 已完成（2026-09-29）**：
 
