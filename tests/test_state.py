@@ -15,8 +15,17 @@ Pydantic 模型上能不能被 LangGraph 认出来，是一个**未经验证的�
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph
+from pydantic import ValidationError
 
-from app.graph.state import ConfirmInput, ReviewComment, TravelState
+from app.graph.nodes.plan_generate import STUB_PLAN_STRUCT
+from app.graph.state import (
+    ConfirmInput,
+    PlanDay,
+    PlanItem,
+    PlanStruct,
+    ReviewComment,
+    TravelState,
+)
 
 
 def _comment(severity: str, detail: str = "问题") -> ReviewComment:
@@ -99,6 +108,151 @@ def test_confirm_input_requires_known_action():
     assert ConfirmInput(action="revise", feedback="第2天太赶").feedback == "第2天太赶"
     with pytest.raises(ValueError):
         ConfirmInput(action="maybe")  # type: ignore[arg-type]
+
+
+# ===========================================================================
+# plan_struct 契约（P4.0）
+# ===========================================================================
+#
+# 这些断言的价值不在「Pydantic 能不能校验格式」—— 那不用测。
+# 它们钉的是**设计决定**：哪些问题该在结构层拦、哪些该留给 self_review，
+# 以及哪些字段是代码填的而不是模型填的。这类决定没有测试就会被下一个人
+# 当作遗漏「顺手补上」，而每一条都有明确的反面代价（写在各自的 docstring 里）。
+
+
+def test_plan_item_normalizes_loose_time_but_rejects_garbage():
+    """时分由代码归一化，归不了的不猜。
+
+    「9:00」「9：00」→ `09:00`（纯机械补零，不该为它多烧一轮 LLM）；
+    「下午2点」→ **报错**，让它走「只重试 JSON 段」。
+
+    反面代价：若在这里猜（把「下午2点」当 02:00），时间冲突校验会拿着一个
+    错数字认真工作 —— 一个「看起来通过了」的假阳性，比报错难查得多。
+    """
+    assert PlanItem(kind="attraction", name="X", start="9:00").start == "09:00"
+    assert PlanItem(kind="attraction", name="X", start="09：00").start == "09:00"
+    assert PlanItem(kind="attraction", name="X", start=" 9:00 ").start == "09:00"
+
+    for bad in ("下午2点", "25:00", "9:0", "09:00-11:00", ""):
+        with pytest.raises(ValidationError):
+            PlanItem(kind="attraction", name="X", start=bad)
+
+
+def test_plan_item_kind_has_no_transport():
+    """`kind` 不含 `transport` —— 通勤段不归模型管。
+
+    通勤时长由 `DistanceTool` 按经纬度算（精度远高于模型估的）。让模型也能
+    输出 transport 条目，就会有两个数字（模型的、工具的）都要用，而它们
+    必然打架。这条测试是那个决定的钉子（§3.1 的 PlanItemKind 注释）。
+    """
+    assert PlanItem(kind="attraction", name="X").kind == "attraction"
+    with pytest.raises(ValidationError):
+        PlanItem(kind="transport", name="从A到B")  # type: ignore[arg-type]
+
+
+def test_plan_item_poi_id_defaults_to_none():
+    """`poi_id` 缺省 None，且这是**幻觉信号**而不是「没填」。
+
+    模型只输出 `name`，`poi_id` 由 `plan_generate` 的代码回查候选清单回填。
+    回查不到就留 None —— 于是 self_review 的幻觉校验退化成一次 `is None` 判断，
+    确定性的、零成本。
+
+    反面代价：若让模型自己吐 id，它会编出一批**格式正确、库里没有**的 id，
+    靠肉眼和靠「格式对不对」都发现不了，只能再查一次库才知道。
+    """
+    assert PlanItem(kind="attraction", name="宽窄巷子").poi_id is None
+    assert PlanItem(kind="attraction", name="宽窄巷子", poi_id="cd-001").poi_id == "cd-001"
+
+
+def test_plan_struct_does_not_validate_content():
+    """**空行程在结构上合法** —— 这是刻意的，不是漏了校验。
+
+    `days == []`、`items == []` 都是「内容不合理」，归 self_review 管。
+    若在 Pydantic 层拦掉，失败会表现成 ValidationError，而 §4.2 对它的处置是
+    「只重试 JSON 段」—— **真相却是「模型生成了一个空行程」，那该回炉重生成
+    整个行程**。两条完全不同的处置，被一个校验混成了同一条路。
+
+    判据：这件事的失败该走哪条处置。
+
+    ⚠️ **必须显式传空列表，不能只断 `PlanStruct()`。** Pydantic 默认
+    `validate_default=False` —— **缺省值不参与校验**。所以一个加在 `days` 上的
+    `min_length=1` 对 `PlanStruct()` 完全无效，只有显式 `PlanStruct(days=[])`
+    才会撞上它。变异测试⑤ 第一次就是这么骗过去的：只断缺省路径，等于没断。
+    """
+    # 缺省路径
+    assert PlanStruct().days == []
+    assert PlanDay(day_index=0).items == []
+
+    # **显式空值路径** —— 内容校验若被加回来，撞上的是这一条
+    assert PlanStruct(days=[]).days == []
+    assert PlanDay(day_index=0, items=[]).items == []
+    assert PlanStruct(days=[PlanDay(day_index=0, items=[])]).days[0].items == []
+
+
+def test_plan_struct_nights_is_derived_from_days():
+    """`nights` 是 `days` 的派生属性，且**不等于 hotel 条目数**。
+
+    它回答「要订几晚」（算术：d 天睡 d-1 晚）；完整性校验问的是「行程里提没提
+    住宿」（文本）。两个问题、两个答案，不该互相推导 —— 否则模型多写一条
+    「第 3 晚也住酒店」就会让预算悄悄翻倍（§8.2 的住宿分项）。
+
+    同时钉住它是派生属性：一旦有人加成字段，就有了第二份事实来源。
+    """
+    assert "nights" not in PlanStruct.model_fields
+    assert PlanStruct().nights == 0
+    assert PlanStruct(days=[PlanDay(day_index=0)]).nights == 0
+    assert PlanStruct(days=[PlanDay(day_index=i) for i in range(3)]).nights == 2
+
+    # 三天行程 + 三条住宿记录 → 晚数仍是 2，不是 3
+    three_days = PlanStruct(
+        days=[PlanDay(day_index=i, items=[PlanItem(kind="hotel", name="H")]) for i in range(3)]
+    )
+    assert three_days.nights == 2
+
+
+def test_plan_models_are_frozen():
+    """三个模型 frozen —— 防「共享可变常量被就地改动」这类跨会话污染。
+
+    `STUB_PLAN_STRUCT` 是模块级常量、被所有 thread 共用。它若不是 frozen，
+    某处一个 `stub.days[0].items[0].poi_id = "x"` 就会改到**所有会话**看到的
+    那份 —— 症状是「A 会话的占位数据出现在 B 会话里」，而没人会去查常量。
+    修改的唯一途径是 `model_copy(update=...)`，这也是 P4.2 回填 poi_id 的方式。
+    """
+    item = PlanItem(kind="attraction", name="X")
+    with pytest.raises(ValidationError):
+        item.name = "Y"  # type: ignore[misc]
+
+    fixed = item.model_copy(update={"poi_id": "cd-001"})
+    assert fixed.poi_id == "cd-001" and item.poi_id is None
+
+
+def test_stub_plan_struct_is_well_formed_but_incomplete():
+    """P3 的占位 `plan_struct`：**结构合法、内容不合格**。
+
+    结构合法 —— 让 `PlanStruct` 的约束在 P3 的每条路径里都被真实构造一遍，
+    否则这些约束要到 P4.2 才有第一行代码碰它们，那时出问题会被误当成
+    「接入 LLM 引入的」。
+
+    内容不合格 —— `poi_id` 全为 None，所以 P4.3 的幻觉校验落地后会**正确地**
+    把它判成幻觉。让空壳在真校验下表现为「有问题」，而不是伪装成合格行程
+    （与 `evaluate` 空壳给 0 分而不是 85 分同一条姿态）。
+    """
+    assert isinstance(STUB_PLAN_STRUCT, PlanStruct)
+    assert STUB_PLAN_STRUCT.days, "占位数据必须真的有一天的内容，否则等于没构造"
+    items = [item for day in STUB_PLAN_STRUCT.days for item in day.items]
+    assert items, "同上"
+    assert all(item.poi_id is None for item in items), "占位数据应当是「会被判为幻觉」的"
+
+
+def test_travel_state_plan_struct_defaults_to_none():
+    """`plan_struct` 缺省 None 而不是空 `PlanStruct()`。
+
+    两者含义不同：None = **还没生成 / 生成失败**；空的 `PlanStruct` = 生成了一个
+    空行程。self_review 对前者报「生成失败」（同样走回炉），对后者报「行程为空」——
+    两条意见的文案和修复方向都不一样。
+    """
+    assert TravelState().plan_struct is None
+    assert "plan_struct" in TravelState.model_fields
 
 
 # ===========================================================================

@@ -25,8 +25,15 @@
 LLM 只做**语义级补充审核**且 severity 固定为 `warn` —— 让 LLM 的产出能阻塞
 通过，等于给它一个制造死循环的开关。
 
-**这些校验需要 `plan_struct`，而它的 schema 尚未定义**（见 `plan_generate.py`
-的说明）。所以 P3 的审核无从下手，只能报一条「还没实现」。
+**这些校验的输入 `plan_struct` 已于 P4.0 定义**（`PlanStruct`，见
+`app/graph/state.py`），阻塞项解除。P3 的审核仍无从下手，但原因变了：
+校验逻辑本身（`validators/`）要 P4.3 才写，现在只能报一条「还没实现」。
+
+> ⚠️ 写校验时有两条分工不能越界：
+> 一是 **Pydantic 管结构、本节点管内容**（`PlanStruct` 的说明）——「行程是空的」
+> 是内容问题，要在校验里报，而不是让它变成构造期的 ValidationError；
+> 二是 **`plan_struct is None` 也是一种内容问题**（生成彻底失败），
+> 要报一条 error 走回炉，**不是** `if plan_struct is None: return` 直接放行。
 """
 
 import logging

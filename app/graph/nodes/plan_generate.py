@@ -13,15 +13,32 @@ P3 阶段**不调用 LLM、不调用工具**：本文件产出一段写明了是
 入参本来就是确定性的（城市名、POI 名），交给 LLM 选只会带来编造 POI 名、
 重复调用、参数格式错三类故障。把不确定性关在「表达」环节，不关在「取数」环节。
 
-## ⚠ P4 的阻塞项：`plan_struct` 的 schema 全文未定义
+## `plan_struct` 的 schema 已定义（P4.0，2026-09-29）
 
-§3.1 把它声明成裸 `dict`（不校验），§4.2 只说了句「每天点位顺序」，
-而 §8.2 的预算估算器要从它里面读出「门票单价 × 人数」「住宿晚数」这些量。
-**具体字段（`days[].items[].poi_id` / `start` / `end` / `kind`？）一处也没写。**
+原先的阻塞项已解除：`PlanStruct` / `PlanDay` / `PlanItem` 落在
+`app/graph/state.py`，字段从下游消费者倒推而来（§4.2 有字段溯源表）。
+`TravelState.plan_struct` 的类型相应从裸 `dict` 收紧为 `PlanStruct | None`。
 
-所以本节点**刻意不写 `plan_struct`** —— 写一个占位形状出来，等 P4 定稿时
-它要么被推翻、要么更糟：被人当成契约照抄。宁可这里空着，把缺口摆在明处。
-（同 P1.2 对 `TravelRequirementDelta` 的处理。）
+## 生成流程里有一处「代码回填」，别写漏（§4.2）
+
+LLM 只输出 `PlanItem.name`，**`poi_id` 由本节点的代码回填**：
+
+```
+模型给出 days[].items[].name
+  → 拿候选清单回查（精确匹配 → 归一化匹配）
+  → 命中：填上 poi_id
+  → 未命中：poi_id 留 None（= 幻觉信号，交给 self_review 判）
+```
+
+**回填必须在这里做，不能推迟到 self_review。** 两个下游都要用它（§4.3 的
+幻觉/折返校验、§8.2 的门票单价），在两处各查一次就是两份实现；而且
+`plan_struct` 存了 `poi_id` 之后是**自洽**的 —— `evaluate` 不必再持有候选清单。
+
+> ⚠️ **回查失败会触发回炉，可能形成环。** 模型把「宽窄巷子」写成「宽窄巷子景区」，
+> 回查失败 → self_review 报幻觉 → 回炉 → 模型**大概率还会这么写**。所以 §4.2 的
+> prompt 必须把候选名字**逐字列出**并要求照抄，且回查要做归一化（去「景区」「公园」
+> 这类后缀）。真绕不出来时由 G1 兜底降级放行 —— 而不是在这里放宽判据
+> （放宽就再也抓不到真幻觉了）。
 
 ## 覆盖语义的两处清空
 
@@ -36,7 +53,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 
-from app.graph.state import TravelState
+from app.graph.state import PlanDay, PlanItem, PlanStruct, TravelState
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +64,26 @@ STUB_DRAFT_PLAN = (
     "> 行程生成节点（§4.2）要到 P4 才接入 LLM 与工具层。\n"
     "> 当前存在的意义：让 self_review / user_confirm / evaluate 有东西可读，\n"
     "> 并把图流转跑到通。\n"
+)
+
+# 占位 `plan_struct`。它**结构合法、内容不合格**，这是故意的 —— 两件事分开看：
+#
+#   - 结构合法，是为了让 `PlanStruct` 的约束（`HH:MM`、`kind` 字面量、frozen）
+#     在 P3 的每条路径里都被真实构造一遍。全字段留空的话，这些约束直到 P4.2
+#     才有第一行代码碰它们 —— 而那时出问题会被误当成「接入 LLM 引入的」。
+#   - 内容不合格（`poi_id=None`、名字是占位串），是为了让 P4.3 的幻觉校验落地时
+#     **正确地把它判为幻觉**。让空壳在真校验下表现为「有问题」，而不是伪装成
+#     一份合格行程 —— 与 `evaluate` 空壳给 0 分而不是 85 分同一条姿态。
+STUB_PLAN_STRUCT = PlanStruct(
+    days=[
+        PlanDay(
+            day_index=0,
+            items=[
+                PlanItem(kind="attraction", name="（P4 占位景点）", start="09:00", end="11:00"),
+                PlanItem(kind="meal", name="（P4 占位用餐）", start="12:00", end="13:00"),
+            ],
+        )
+    ]
 )
 
 
@@ -65,7 +102,7 @@ def plan_generate(state: TravelState, config: RunnableConfig) -> dict[str, Any]:
 
     return {
         "draft_plan": STUB_DRAFT_PLAN,
-        # plan_struct 留空，理由见模块 docstring 的「P4 的阻塞项」
+        "plan_struct": STUB_PLAN_STRUCT,   # 结构合法、内容不合格，见常量处说明
         "review_comments": [],   # 覆盖语义：清空上一轮意见
         "user_feedback": "",     # 覆盖语义：反馈已被本轮消费
         "stage": "reviewing",

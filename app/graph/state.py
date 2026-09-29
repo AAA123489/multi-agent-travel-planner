@@ -18,13 +18,17 @@
 
 3. **派生值不设字段**：载荷需要但状态里没有的值（如 G1 的 `unresolved_errors`）
    做成派生视图，避免第二份事实来源漂移。见 `TravelState.unresolved_errors`。
+
+4. **结构校验归 Pydantic，内容校验归 `self_review`**（P4.0 定，见 `PlanStruct`）。
+   判据是「这件事的失败该走哪条处置」：格式错 → 重试 JSON 段；内容不合理
+   → 回炉重生成。在 Pydantic 里拦内容问题，会把后者的失败伪装成前者。
 """
 
 from operator import add
 from typing import Annotated, Literal
 
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # 字面量类型别名 —— 集中定义，供节点、校验器、prompt 渲染共用
@@ -56,6 +60,22 @@ Stage = Literal[
     "done",
     "failed",
 ]
+
+PlanItemKind = Literal["attraction", "meal", "hotel"]
+"""行程条目的类别。
+
+**刻意没有 `transport`。** 通勤段由 `DistanceTool` 按相邻点位的经纬度算出来
+（精度远高于模型估的），让模型输出一条「从 A 打车到 B 40 分钟」只会多一个
+可编造的对象，而它和工具算出的那个数字必然打架 —— 那时要以谁为准？
+
+**也没有城际交通**：`Transport` 字面量只覆盖市内，城际段的契约未定义
+（§6.6）。`INTERCITY_BACKEND` 配置项先留着占位，功能等契约定完再上。"""
+
+# "HH:MM" 的 24 小时制。**用 pattern 而不是只写 str**：`start`/`end` 是
+# 时间冲突校验的唯一输入，而 §4.1 的日期教训（P4.0 实测：「10月1号」原样返回）
+# 说明模型不会自觉归一化格式。让它在这里撞墙 → 走 §4.2 的「只重试 JSON 段」，
+# 好过让 `"下午2点"` 一路流到校验函数里被静默误解析。
+HHMM_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +142,118 @@ class ConfirmInput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# plan_struct —— 机器可读的行程（§4.2 的第二输出段）
+# ---------------------------------------------------------------------------
+#
+# 下面三个模型一律 **frozen**。它们是值对象，不是可变容器：
+#
+#   - 唯一预期的修改方式是 `model_copy(update=...)` —— 而 P4.2 的流程恰好就是
+#     「模型输出 → 回填 poi_id → 得到新对象」，天然是复制管道。
+#   - 更要紧的是防一类真 bug：模块级常量若是一个可变的 Pydantic 模型，
+#     下游任何一处原地改动都会**跨会话污染**（同一个对象被所有 thread 共用）。
+#     P3 的 `STUB_DRAFT_PLAN` 是个 str，没有这个问题；换成模型就有了。
+
+
+class PlanItem(BaseModel):
+    """行程里的一个条目（景点 / 用餐 / 住宿）。
+
+    字段是从**下游消费者倒推**出来的，不是凭空设计的（每个字段都有主）：
+
+      - `start` / `end` → §4.3 的时间冲突、闭馆冲突；§8.2 的市内交通时长
+      - `kind`          → §4.3 的完整性（有没有用餐/住宿）、§8.2 的门票分项
+      - `poi_id`        → §4.3 的幻觉检测、路线折返（坐标）；
+                          §8.2 的门票单价（`POI.price`）
+      - `name`          → 给人看；同时是 `poi_id` 回查失败时的**唯一线索**
+
+    ⚠️ **`poi_id` 由 `plan_generate` 的代码回填，不是 LLM 输出。**
+    模型只负责给出 `name`，代码拿着候选清单回查（先精确匹配、再归一化匹配）。
+    这样做把「幻觉检测」变成确定性的、零成本的：**回查不到 → `poi_id` 留 None
+    → self_review 直接判为幻觉 POI**。
+
+    让模型直接吐 id 是反过来的 —— 它会编出一批**格式正确、库里没有**的 id，
+    而那些 id 看上去和真的没区别，校验只能靠再查一次库才发现。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: PlanItemKind
+    name: str
+    poi_id: str | None = Field(
+        default=None,
+        description="由 plan_generate 回填；None = 候选清单里没有这个名字（疑似幻觉）",
+    )
+    start: str | None = Field(default=None, pattern=HHMM_PATTERN, description="HH:MM")
+    end: str | None = Field(default=None, pattern=HHMM_PATTERN, description="HH:MM")
+
+    @field_validator("start", "end", mode="before")
+    @classmethod
+    def _normalize_hhmm(cls, value: object) -> object:
+        """把「9:00」「9：00」这类等价写法先归一到 `HH:MM`，再做格式校验。
+
+        **这里与 §4.1 的日期处理刻意相反，判据是「归一化需要的信息在谁手上」：**
+
+          - 日期 → 交给 LLM。把「10月1号」变成 `2026-10-01` 需要知道今天几号，
+            而 `today` 是注入 prompt 的、LLM 手里就有 —— 代码再做一次就是两份实现。
+          - 时分 → 交给代码。补个零不需要任何外部信息，为它多烧一轮 LLM 不划算。
+
+        **归不了的绝不在这里猜。** 「下午2点」原样返回、撞上 `pattern` 报错，
+        然后由 §4.2 的「只重试 JSON 段」处理 —— 猜错（把「下午2点」当成 02:00）
+        会让时间冲突校验拿着一个错数字认真工作，比直接失败糟得多。
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip().replace("：", ":")   # 全角冒号
+        head, sep, tail = text.partition(":")
+        if sep and head.isdigit() and len(head) == 1:
+            return f"0{head}:{tail}"
+        return text
+
+
+class PlanDay(BaseModel):
+    """行程的一天。`items` 的**顺序即当天游览顺序** —— 通勤校验按相邻对取。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    day_index: int = Field(ge=0, description="0-based，与 `ReviewComment.day_index` 同一套")
+    items: list[PlanItem] = Field(default_factory=list)
+
+
+class PlanStruct(BaseModel):
+    """每日点位顺序（§4.2）。
+
+    **只做结构校验，不做内容校验** —— 这条分工要守住：
+
+      - Pydantic 管的：`day_index` 非负、`start`/`end` 是 `HH:MM`、
+        `kind` 在字面量集合内。
+      - `self_review` 管的：行程**空不空**、有没有用餐时段、有没有闭馆冲突……
+
+    所以这里**刻意没有「每天至少一个条目」这类校验**。`days == []` 在结构上
+    合法，它是内容问题 —— 若在这里 raise，失败会表现成「JSON 解析失败」，
+    而真相是「模型生成了一个空行程」，两者该走完全不同的处置
+    （前者重试 JSON 段，后者回炉重生成整个行程）。
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    days: list[PlanDay] = Field(default_factory=list)
+
+    @property
+    def nights(self) -> int:
+        """住宿晚数（§8.2 的住宿分项要用）。
+
+        **派生属性，不设字段。** 它是 `days` 的函数（`d` 天行程睡 `d-1` 晚），
+        存一份就是第二份事实来源 —— 与 `TravelState.unresolved_errors`、
+        `POI.search_url` 同一处理方式。
+
+        ⚠️ 它**不是**「hotel 类条目的数量」。两个数字回答的是不同问题：
+        住宿分项问「要订几晚」（算术），完整性校验问「行程里提没提住宿」
+        （文本）。它们不该相等，也不该互相推导 —— 让它们各自独立，
+        才不会因为模型多写了一条「第 3 晚也住酒店」而让预算悄悄翻倍。
+        """
+        return max(0, len(self.days) - 1)
+
+
+# ---------------------------------------------------------------------------
 # 全局状态
 # ---------------------------------------------------------------------------
 
@@ -145,7 +277,7 @@ class TravelState(BaseModel):
 
     # ---------- 产物 ----------
     draft_plan: str = ""                  # 行程草稿（Markdown，给人看）
-    plan_struct: dict = Field(default_factory=dict)   # 每日点位顺序（JSON，给机器校验）
+    plan_struct: PlanStruct | None = None  # 每日点位顺序（给机器校验）
     review_comments: list[ReviewComment] = Field(default_factory=list)  # **覆盖**语义
     review_history: Annotated[list[list[ReviewComment]], add] = Field(default_factory=list)
     review_passed: bool = False

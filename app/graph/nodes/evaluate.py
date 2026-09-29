@@ -18,7 +18,13 @@
 - `total_score = 0.40*req + 0.35*feas + 0.25*budget`，`passed` 还带两条独立及格线
   （`feasibility >= 60`、`budget_fit >= 50`）—— 防「需求匹配满分但行程根本走不通」
 
-前两项都读 `plan_struct`，而它的 schema 尚未定义（见 `plan_generate.py`）。
+前两项都读 `plan_struct`（schema 已于 P4.0 定义，见 `app/graph/state.py`）。
+预算估算要用的量从它里面取：门票 = `PlanItem.poi_id` → `POI.price` × 人数；
+住宿 = `PlanStruct.nights` × `hotel_price`；市内交通 = 相邻点位通勤时长之和。
+
+> ⚠️ **通勤时长不存在 `plan_struct` 里，由 `DistanceTool` 现算。** 存一份就是
+> 第二份事实来源，而且模型估的时长和工具算的必然打架。`plan_struct` 只存
+> 「顺序与时刻」，距离类的东西全部现算 —— 与 `search_url` 做成派生属性同一条理。
 """
 
 import logging

@@ -27,7 +27,7 @@
 | **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘 |
 | **P2 数据与工具层** | ✅ **完成** —— 30 条 POI + 三个 mock backend + 四个工具 + registry 分发 |
 | **P3 图流转打通** | ✅ **完成（★ 里程碑 M1）** —— 建图 + 5 个节点空壳 + 装饰器，四条路径全走通，`ruff` 干净 / **187 passed** |
-| **P4.0 结构化输出实测** | ✅ **完成** —— ⚠️ **照字面写 `with_structured_output` 会 100% 400**，两处修正已回填 §4.1 / §4.5 / §12.2 |
+| **P4.0 结构化输出实测 + `plan_struct` 定稿** | ✅ **完成** —— ⚠️ **照字面写 `with_structured_output` 会 100% 400**（§12.2）；`plan_struct` 三模型已落 `state.py`，195 passed |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
@@ -46,6 +46,22 @@
 **P4.0 对 `app/core/llm.py`（P4.0-C，还没写）的硬要求**：「显式 `method="function_calling"`」和「关 thinking」必须**封在工厂一处**，节点代码不许自己建 `ChatOpenAI` —— 否则这两件事会在每个节点各踩一遍，而且第二件踩了**不报错**。
 
 **尚未验**：主力档（`plan_generate`/`self_review`）关不关 thinking。留给 P4.2 —— thinking ON 时 `with_structured_output(fc)` 不可用、但 `bind_tools(tool_choice="auto")` 可用（已实测），所以保留推理能力的路是通的。**不能因为省 token 就默认把主力档的推理关掉。**
+
+**P4.0 第二个待验项：`plan_struct` 的 schema 已定稿**（§3.1 / §4.2 / §4.3 / §8.2 同步）。三个模型 `PlanStruct` / `PlanDay` / `PlanItem` 落在 `app/graph/state.py`，`TravelState.plan_struct` 从裸 `dict` 收紧为 `PlanStruct | None`。**字段全部从下游倒推**（§4.3 七条校验 + §8.2 预算各需要什么就定什么），每个字段都有一位「主」。
+
+**五处刻意决定**（每条都有反面代价，写在 §3.1）：
+
+1. **`kind` 里没有 `transport`。** 通勤由 `DistanceTool` 算，让模型也能报一个就有两个数字打架。
+2. **`poi_id` 由 `plan_generate` 的代码回填，不是 LLM 输出。** 模型只给 `name`，代码回查候选清单；**查不到留 `None` = 幻觉信号**，校验退化成 `is None`。让模型吐 id 会编出一批**格式正确、库里没有**的 id。
+3. **只做结构校验，不做内容校验。** `days == []` 合法 —— 判据是「这件事的失败该走哪条处置」：格式错 → 重试 JSON 段；内容不合理 → 回炉重生成。
+4. **`nights` 是派生属性且刻意 ≠ hotel 条目数。** 住宿分项问「订几晚」（算术），完整性校验问「提没提住宿」（文本）。
+5. **三模型 frozen。** 防「模块级常量被就地改动 → 跨会话污染」。
+
+**一个涉及行为的关键取舍 —— 时刻由 LLM 给，代码只校验不排期。** 若改由代码按 `opening_hours` 排，§4.3 的**闭馆冲突与时间冲突会变成永远不可能触发的死代码**，而它们正是驱动 G1 回炉的两条。**永远通过、看起来像验证的校验，比没有校验更糟。**
+
+**两处归一化的分工，判据是「归一化需要的信息在谁手上」**：`start`/`end` 补零（`9:00`→`09:00`）归**代码**（纯机械，不值得多烧一轮 LLM）；`start_date` 换算（`10月1号`→ISO）归 **LLM**（需要 `today`，那是注入 prompt 的）。**归不了的绝不猜**——「下午2点」撞 pattern 报错走重试，猜错（当成 02:00）会让校验拿着错数字认真工作。
+
+**P4.0 新增 8 条测试 + `scratch/mutate_p4.py`（9 条变异，9/9 抓住）。** 变异测试抓出了我自己一个弱断言：**Pydantic 默认 `validate_default=False`，缺省值不参与校验** —— 所以只断 `PlanStruct()` 等于没断「内容不该被校验」，必须显式传 `PlanStruct(days=[])`。
 
 **P1.2 实测结论**：LangGraph **确实支持** Pydantic `BaseModel` 作状态 schema + 其上的 `Annotated[list, add]` reducer（`tests/test_state.py::test_reducers_inside_real_graph` 在真实编译图上验证）。同时确认节点拿到的状态是**模型对象**（可属性访问 `state.review_comments[0].severity`），不是裸 dict。**升级 langgraph 后这个测试若变红，说明状态契约层行为变了。**
 
@@ -80,7 +96,7 @@ rc#1 → pg#1 → sr#1 → pg#2 → sr#2 → uc#1 → pg#3 → sr#3 → pg#4 →
 
 **默认空壳审核「永远不通过」是刻意的** —— 它让 G1 降级放行成为**默认可见**的行为，而不是要靠注入才看得到的分支。想看通过的那条路用 `overrides` 换行为（`tests/test_graph.py` 的 `review_failing_times()` 与 `scratch/walk_graph.py` 的 `review_passing_after()`）。
 
-**下一步：P4.0-B / P4.0-C**。P4.0 的两个待验项里，**第一个（`with_structured_output` 实测）已验完**（见上）；**第二个 `plan_struct` 的 schema 仍待定**，而且它的字段可以从下游倒推（§4.3 七条校验 + §8.2 预算估算各自需要什么），不必凭空发明。之后才能写 `app/core/llm.py`（P4.0-C）。顺序见 docs/开发流程.md 的 P4 段。
+**下一步：P4.0-C —— 写 `app/core/llm.py`。** 两个待验项都已完成（结论见上），契约齐了。工厂的硬要求：**「显式 `method="function_calling"`」与「关 thinking」必须封在一处**，节点代码不许自己建 `ChatOpenAI`；另配 token/耗时埋点与双模型槽位（便宜档关 thinking，主力档待 P4.2 定）。之后进 P4.1 `requirement_collect` 接真 LLM。顺序见 docs/开发流程.md 的 P4 段。
 
 **P2 已完成（2026-09-29）**：
 
