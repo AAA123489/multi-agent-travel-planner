@@ -18,7 +18,8 @@
 两层的名字刻意不同 —— 看一个调用点就能判断它在哪一层。
 """
 
-from typing import Annotated, Generic, Literal, Protocol, TypeVar
+from typing import Annotated, Generic, Literal, Protocol, TypeVar, runtime_checkable
+from urllib.parse import quote
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -80,9 +81,23 @@ class POI(BaseModel):
     lat: float = Field(ge=-90, le=90)
     lng: float = Field(ge=-180, le=180)
     rating: float = Field(ge=0, le=5)
-    price: float | None = Field(default=None, ge=0, description="门票 / 房价；None = 未知")
+    price: float | None = Field(
+        default=None, ge=0, description="门票 / 房价 / 餐饮人均；None = 未知"
+    )
     price_estimated: bool = Field(default=False, description="价格为估算值，前端要标注")
     opening_hours: OpeningHours | None = None
+
+    @property
+    def search_url(self) -> str:
+        """在地图上搜索这个场所的链接（开发流程 P2 铁律③）。
+
+        **做成派生视图而不是字段**，理由与 `TravelState.unresolved_errors` 同源：
+        它是 `name` + `city` 的函数，存一份就是第二份事实来源 —— 数据里改个名，
+        URL 还留着旧的，而没有人会去测「这条 URL 和这条 name 还对得上吗」。
+
+        拼的是**真实搜索页**而不是死链：演示时点进去能看到真东西（铁律③）。
+        """
+        return f"https://www.amap.com/search?query={quote(self.name)}&city={quote(self.city)}"
 
 
 class DistanceInfo(BaseModel):
@@ -197,7 +212,24 @@ class ToolResult(BaseModel, Generic[T]):
 # 按域 Protocol —— 每个只管一个数据域（§6.4）
 # ============================================================================
 
+# ⚠ **实现方不要继承这三个 Protocol，只要结构上长得一样就行。**
+#
+# 已实测（Python 3.12）：显式继承 Protocol 会让**漏实现的方法静默返回 `None`** ——
+#
+#     class Impl(POIBackend):
+#         pass               # 忘了实现 query_poi
+#     Impl().query_poi(...)  # → None，不报错
+#
+# 也就是说继承反而**削弱**了检查：漏实现一个方法，症状是「工具返回 None」
+# 而不是「启动就报错」，与「绿不等于过」是同一类陷阱。结构化实现没这个问题 ——
+# 少写一个方法，`isinstance` 断言当场变红（见 tests/test_tools.py 的一致性测试）。
+#
+# `@runtime_checkable` 是为了让那个断言能跑。注意它只检查**方法名存不存在**，
+# 不检查签名 —— 所以签名由 `test_protocol_methods_return_tool_result` 那一组
+# 反射测试单独守。
 
+
+@runtime_checkable
 class POIBackend(Protocol):
     """景点域。
 
@@ -214,6 +246,7 @@ class POIBackend(Protocol):
         ...
 
 
+@runtime_checkable
 class DistanceBackend(Protocol):
     """距离域。**入参是 POI 对象，不是 id。**
 
@@ -226,6 +259,7 @@ class DistanceBackend(Protocol):
         ...
 
 
+@runtime_checkable
 class HotelBackend(Protocol):
     """酒店域。只报均价，不返回具体酒店 —— 住哪家由生成节点决定，工具只管预算。"""
 
@@ -239,6 +273,7 @@ class HotelBackend(Protocol):
 # ============================================================================
 
 
+@runtime_checkable
 class TravelTools(Protocol):
     """节点看到的四个工具（§6.3 那张表）。
 

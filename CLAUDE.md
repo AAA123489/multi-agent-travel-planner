@@ -24,13 +24,35 @@
 | P0.2 验证 `interrupt()` 语义 | ✅ 结论已回填文档 |
 | P0.3 验证 LLM 的 tool_calls 格式 | ✅ 5 场景全通过，**不需要归一化层** |
 | P0.4 实测回填文档 | ✅ |
-| **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘，`ruff` 干净 / **98 passed** |
+| **P1 契约层** | ✅ **完成** —— P1.1–P1.7 全部落盘 |
+| **P2 数据与工具层** | ✅ **完成** —— 30 条 POI + 三个 mock backend + 四个工具 + registry 分发，`ruff` 干净 / **163 passed** |
 
 **P0.3 实测结论**：`deepseek-v4-flash` 返回标准 `tool_calls`，流式/并行/回灌三种路径都正常，未出现 DSML 文本泄漏 → `app/core/llm.py` 不做归一化层。**结论与模型名绑定，换模型必须重跑** `scratch/verify_tool_calls.py`。
 
 **P1.2 实测结论**：LangGraph **确实支持** Pydantic `BaseModel` 作状态 schema + 其上的 `Annotated[list, add]` reducer（`tests/test_state.py::test_reducers_inside_real_graph` 在真实编译图上验证）。同时确认节点拿到的状态是**模型对象**（可属性访问 `state.review_comments[0].severity`），不是裸 dict。**升级 langgraph 后这个测试若变红，说明状态契约层行为变了。**
 
-**下一步：进 P2 数据层**（顺序见 docs/开发流程.md 的 P2 段）。
+**下一步：进 P3 图流转打通**（★ 里程碑 M1，顺序见 docs/开发流程.md 的 P3 段）。P3 要建图 + 接 checkpointer，**不碰 LLM**（节点先返回假数据打通流转）。
+
+**P2 已完成（2026-09-29）**：
+
+| 任务 | 产出 |
+|---|---|
+| P2.1 | `data/poi_clean.json` —— 成都 15 + 杭州 15，真实景点名与经纬度 |
+| P2.2 | `app/tools/backends/mock_backend.py` —— **三个类**（POI / 距离 / 酒店），按域各一个（§6.4） |
+| P2.3 | `app/tools/{poi_query,opening_hours,distance,hotel_price}.py` —— 每个含**纯函数**（铁律②）+ 门面用的工具类 |
+| P2.4 | `app/tools/registry.py` —— 按域选后端（经 `effective_backend`）→ 组装成 `TravelTools` 门面 |
+| P2.5 | `tests/test_tools.py` 44 → **108 条** |
+
+**新增了一个 §13 没列的文件：`app/tools/poi_store.py`** —— POI 内存索引 + 逐条容错加载。三域共用一份（不重复载入）。已在 §13 与 §6.5 补记。
+
+**P2 顺手定下的四处契约**（已写入 §6.3 / §6.5 / §9.1）：
+
+1. **`POIStore` 是 P2 版的「归一化层」**。§6.5 要求每个 backend 有 `_normalize_xxx` 纯函数对付「上游返回壳」—— 但 mock 读的是自家预处理产物，没有返回壳这回事。面对同一个敌人的等价物是**逐条容错**：坏行跳过 + warning，其余照常可用。**「空」和「坏」必须分开**（空 store = 这个城市没景点；全坏 = 事故），不能都表现成空列表。真实抓包 payload 那份工作留给 P8 接高德时做。
+2. **实现方不要继承那四个 Protocol** —— **已实测**：显式继承会让漏实现的方法**静默返回 `None`**（`class Impl(POIBackend): pass` 能实例化，调用得 `None` 不报错）。继承反而削弱了检查。改用结构化实现 + `isinstance` 断言 + 「方法必须在自己 `__dict__` 里」的断言（`test_mock_backend_defines_protocol_methods_itself`）。
+3. **`search_url` 做成派生属性，不加字段** —— 铁律③要求 URL 指向真实可点开的页面，但 §9.1 的 schema 没有 `url` 字段。它是 `name` + `city` 的函数，存一份就是第二份事实来源。与 `unresolved_errors` 同一处理方式。
+4. **酒店兜底的「全局经验值」补上了具体数字**（§6.3 原本只说「用全局经验值兜底」却从没定义）：budget 250 / comfort 450 / luxury 900 元/晚，**写死的估计不是实测**，故必须同时置 `is_approx=True`。
+
+**一处要留意的地方**：P2 验收的「武侯祠 → 宽窄巷子 3~6 km」**区间偏宽**——实测把 `ROAD_FACTOR` 从 1.3 改成 1.0（距离缩小 23%）时它**依然是绿的**（3.17 km 仍落在区间内）。真正守住这个系数的是 `test_estimate_applies_road_factor_and_is_always_estimated`（它直接对 Haversine × 1.3 断言）。**验收标准是给人看的粗筛，不是回归网**；两者都要有。
 
 **G5（内容收敛检测）已砍（2026-09-28 定案）。** 它要比较「新旧 `draft_plan` 的相似度」，而 `draft_plan` 是**覆盖**语义 —— 上一轮草稿已被覆盖，比无可比；落地得先给 `TravelState` 加累加语义的 `draft_history`。而它能买到的收益，只是「在 `MAX_REVIEW_RETRY=3` 之上再省 1–2 轮 LLM 调用」。
 
@@ -38,7 +60,9 @@
 
 于是闸门编号 **G1~G4 是跳号的**（没有 G5），**跳号是刻意的**，它是一处「这里删过一个闸门」的记录。看到编号不连续就想补一个回来 = 把已做的决策推翻一遍。理由写在 [方案设计.md](docs/方案设计.md) §5.2 与 `route_after_review` 的 docstring 两处。
 
-**测试全绿 ≠ 覆盖到位** —— 已实测三次，可复现：删掉 `exceptions.py` 的 `= None`、把路由的 `>=` 改成 `>`、把 `ToolResult` 的不变式判断反过来，每次都**只有新写的测试**才变红（前两次分别是「全绿」和「两条红」）。**新模块落盘必须有测试真的 import 它**，否则它的死活 pytest 不知道，输出上和「全对」长得一模一样。
+**测试全绿 ≠ 覆盖到位** —— 已实测七次，可复现。P1 的三次：删掉 `exceptions.py` 的 `= None`、把路由的 `>=` 改成 `>`、把 `ToolResult` 的不变式判断反过来，每次都**只有新写的测试**才变红（前两次分别是「全绿」和「两条红」）。P2 的四次（全部变红，符合预期）：把 `MockPOIBackend.query_poi` 改名、酒店阈值 `<` 改成 `<=`、`ROAD_FACTOR` 1.3 改成 1.0、坏行容错改成整批失败。
+
+**新模块落盘必须有测试真的 import 它**，否则它的死活 pytest 不知道，输出上和「全对」长得一模一样。**变异测试是唯一能证明这件事的手段** —— 改一行、跑一遍、看红不红，比读覆盖率数字可靠。
 
 P1 **完全不碰 LLM**，无需 API key。
 
