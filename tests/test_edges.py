@@ -6,11 +6,11 @@ Settings 上」的接线测试。
 
 **边界值单独测**：G1 / G3 用的是 `>=` 不是 `>`，差一个字符就是「永远多循环一轮」
 或者「一次都不循环」。这类 off-by-one 不写边界断言就一定漏。
+
+`fresh_settings` fixture 见 `conftest.py`（图测试也用它，故提为公共 fixture）。
 """
 
-import pytest
 
-from app.core.config import get_settings
 from app.graph.edges import (
     route_after_collect,
     route_after_confirm,
@@ -21,24 +21,6 @@ from app.graph.state import ReviewComment, TravelState
 
 def _error(detail: str = "预算超了") -> ReviewComment:
     return ReviewComment(type="budget", severity="error", detail=detail)
-
-
-@pytest.fixture
-def fresh_settings(monkeypatch):
-    """改环境变量后让 `get_settings` 重新读取，测完还原。
-
-    `get_settings` 是 `@lru_cache` 单例 —— 不清缓存的话，最先跑的那个测试读到的
-    配置会被后面所有测试复用，`monkeypatch` 看起来「没生效」，而你会去怀疑
-    路由函数写错了。（这就是 CLAUDE.md 里那句 `get_settings.cache_clear()` 的由来。）
-    """
-
-    def _apply(**env: str) -> None:
-        for key, value in env.items():
-            monkeypatch.setenv(key, value)
-        get_settings.cache_clear()
-
-    yield _apply
-    get_settings.cache_clear()
 
 
 # ===========================================================================
